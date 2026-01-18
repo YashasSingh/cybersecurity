@@ -1,0 +1,15 @@
+Keyword in Filename,"Real-World ""Mask""",Trigger Schedule
+host,Host Process,At Logon
+drivers,Driver Sync,Weekly (Sunday 3 AM)
+nvme,Storage Opt.,Once (1 min after install)
+telemetry,Data Reporting,Daily (12:00 PM)
+power,ACPI Management,At System Startup (Boot)
+vga,Graphics Engine,At Logon
+chipset,Hardware Sync,Monthly (1st of Month)
+audio,DSP Logic,At Logon
+wifi,Wireless Protocol,Every 4 Hours
+thermal,Cooling Logic,Every 1 Hour
+security,TPM/PTT Sync,Daily (4:00 AM)
+bridge,PCI Bus Monitor,At System Startup
+usb,Controller Logic,Daily (6:00 PM)
+soc,System-on-Chip,Weekly (Saturday 11 PM)
