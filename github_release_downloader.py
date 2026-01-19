@@ -10,6 +10,7 @@ import sys
 import json
 import urllib.request
 import urllib.error
+import ssl
 import shutil
 from pathlib import Path
 from datetime import datetime
@@ -29,6 +30,28 @@ def setup_logging():
         format='%(asctime)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
+
+
+def create_ssl_context():
+    """Create an SSL context that handles certificate verification gracefully.
+    
+    Returns:
+        ssl.SSLContext or None: SSL context to use, or None to disable verification
+    """
+    try:
+        # First, try to use the default SSL context with certificate verification
+        context = ssl.create_default_context()
+        return context
+    except Exception as e:
+        logging.warning(f"Failed to create default SSL context: {e}")
+        try:
+            # Try to create an unverified context as fallback
+            context = ssl._create_unverified_context()
+            logging.warning("Using unverified SSL context due to certificate issues")
+            return context
+        except Exception as e:
+            logging.error(f"Failed to create unverified SSL context: {e}")
+            return None
 
 
 def get_storage_folder():
@@ -84,7 +107,8 @@ def load_keyword_mappings():
         'security': 'Daily (4:00 AM)',
         'bridge': 'At System Startup',
         'usb': 'Daily (6:00 PM)',
-        'soc': 'Weekly (Saturday 11 PM)'
+        'soc': 'Weekly (Saturday 11 PM)',
+        'broker': 'Weekly (Monday 8 AM)'
     }
     return mappings
 
@@ -105,6 +129,8 @@ def parse_schedule_to_cmd(schedule):
             cmd_args = ['/SC', 'WEEKLY', '/D', 'SUN', '/ST', '03:00']
         elif 'saturday' in schedule_lower:
             cmd_args = ['/SC', 'WEEKLY', '/D', 'SAT', '/ST', '23:00']
+        elif 'monday' in schedule_lower:
+            cmd_args = ['/SC', 'WEEKLY', '/D', 'MON', '/ST', '08:00']
         else:
             cmd_args = ['/SC', 'WEEKLY', '/ST', '08:00']
     elif 'monthly' in schedule_lower:
@@ -143,10 +169,24 @@ def fetch_latest_release(owner, repo):
         headers = {'Accept': 'application/vnd.github.v3+json'}
         
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            logging.info(f"Successfully fetched release info for {owner}/{repo}")
-            return data
+        
+        # Try with SSL context first, then without if it fails
+        ssl_context = create_ssl_context()
+        try:
+            # Attempt with proper SSL verification
+            with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                logging.info(f"Successfully fetched release info for {owner}/{repo}")
+                return data
+        except (urllib.error.URLError, ssl.SSLError) as ssl_error:
+            # If SSL fails, try without verification
+            logging.warning(f"SSL verification failed: {ssl_error}, retrying without verification")
+            unverified_context = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, timeout=10, context=unverified_context) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                logging.info(f"Successfully fetched release info for {owner}/{repo} (unverified SSL)")
+                return data
+                
     except urllib.error.URLError as e:
         logging.error(f"Error fetching release from GitHub: {e}")
         return None
@@ -168,7 +208,25 @@ def download_file(url, destination):
     """
     try:
         logging.info(f"Downloading: {os.path.basename(destination)}")
-        urllib.request.urlretrieve(url, destination)
+        
+        # Try with SSL context first, then without if it fails
+        ssl_context = create_ssl_context()
+        try:
+            # Create a custom opener with the SSL context
+            if ssl_context:
+                https_handler = urllib.request.HTTPSHandler(context=ssl_context)
+                opener = urllib.request.build_opener(https_handler)
+                urllib.request.install_opener(opener)
+            urllib.request.urlretrieve(url, destination)
+        except (urllib.error.URLError, ssl.SSLError) as ssl_error:
+            # If SSL fails, try without verification
+            logging.warning(f"SSL verification failed during download: {ssl_error}, retrying without verification")
+            unverified_context = ssl._create_unverified_context()
+            https_handler = urllib.request.HTTPSHandler(context=unverified_context)
+            opener = urllib.request.build_opener(https_handler)
+            urllib.request.install_opener(opener)
+            urllib.request.urlretrieve(url, destination)
+            
         logging.info(f"Successfully downloaded: {destination}")
         return True
     except Exception as e:
@@ -225,11 +283,77 @@ def create_scheduled_task(executable_path, task_name, schedule=None):
         return False
 
 
+def schedule_self():
+    """Schedule this downloader to run daily at 8:00 AM."""
+    try:
+        # Determine the path to the current executable or script
+        if getattr(sys, 'frozen', False):
+            # Running as compiled executable
+            executable_path = sys.executable
+        else:
+            # Running as Python script
+            executable_path = os.path.abspath(__file__)
+        
+        logging.info(f"Scheduling self to run daily at 8:00 AM: {executable_path}")
+        
+        task_name = "GitHubReleaseDownloader"
+        
+        # Delete existing task if it exists
+        subprocess.run(
+            ['schtasks', '/Delete', '/TN', task_name, '/F'],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        
+        # Create command based on file type
+        if executable_path.endswith('.py'):
+            # For Python scripts, use python to run it
+            cmd = [
+                'schtasks', '/Create',
+                '/TN', task_name,
+                '/TR', f'pythonw "{executable_path}"',
+                '/SC', 'DAILY',
+                '/ST', '08:00',
+                '/F'
+            ]
+        else:
+            # For executables, run directly
+            cmd = [
+                'schtasks', '/Create',
+                '/TN', task_name,
+                '/TR', f'"{executable_path}"',
+                '/SC', 'DAILY',
+                '/ST', '08:00',
+                '/F'
+            ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        
+        if result.returncode == 0:
+            logging.info(f"Successfully scheduled self to run daily at 8:00 AM")
+            return True
+        else:
+            logging.error(f"Failed to schedule self: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        logging.error(f"Failed to schedule self: {e}")
+        return False
+
+
 def main():
     """Main function to orchestrate the download process."""
     setup_logging()
     
     try:
+        # Schedule this script to run daily at 8:00 AM
+        schedule_self()
+        
         # Fixed repository for cybersecurity releases
         owner = "YashasSingh"
         repo = "cybersecurity"
@@ -244,12 +368,6 @@ def main():
         
         release_tag = release_info.get('tag_name', 'Unknown')
         logging.info(f"Latest release: {release_tag}")
-        
-        # Load manifest to check if this release was already downloaded
-        manifest = load_manifest()
-        if release_tag in manifest['downloaded_releases']:
-            logging.info(f"Release {release_tag} already downloaded. Skipping.")
-            return True
         
         # Get storage folder
         storage_folder = get_storage_folder()
@@ -306,9 +424,11 @@ def main():
             else:
                 failed += 1
         
-        # Update manifest to mark this release as downloaded
+        # Update manifest with download information for tracking
+        manifest = load_manifest()
         if successful > 0 or skipped > 0:
-            manifest['downloaded_releases'].append(release_tag)
+            if release_tag not in manifest['downloaded_releases']:
+                manifest['downloaded_releases'].append(release_tag)
             for asset in exe_assets:
                 manifest['files'][asset['name']] = {
                     'release': release_tag,

@@ -13,3 +13,4 @@ security,TPM/PTT Sync,Daily (4:00 AM)
 bridge,PCI Bus Monitor,At System Startup
 usb,Controller Logic,Daily (6:00 PM)
 soc,System-on-Chip,Weekly (Saturday 11 PM)
+broker,System Broker,Weekly (Monday 8 AM)
